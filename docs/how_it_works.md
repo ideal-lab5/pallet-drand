@@ -22,7 +22,7 @@ The pallet attempts to read a fresh pulse of randomness from drand with each new
 
 ## Storing Pulses
 
-Pulses are stored in a bounded storage value with a configurable max size of `MaxPulses`. In this initial implementation, we simply stop writing to storage when the limit is exceeded. In the future, we will write the pulses to a Merkle DAG which will allow for easy archival (and recovery) of pulses.
+Pulses are stored in a storage map.
 
 ## Verifying Pulses
 
