@@ -5377,7 +5377,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-murmur"
-version = "4.0.0-dev"
+version = "1.0.0-dev"
 dependencies = [
  "ark-bls12-381",
  "ark-serialize",

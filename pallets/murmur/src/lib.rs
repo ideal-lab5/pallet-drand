@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-//! # Murmur Pallet 
-//! 
+//! # Murmur Pallet
+//!
 //!
 //!
 pub use pallet::*;
@@ -17,28 +17,24 @@ mod benchmarking;
 // pub mod weights; TODO
 // pub use weights::WeightInfo;
 
-use log::info;
+use ckb_merkle_mountain_range::{
+	util::{MemMMR, MemStore},
+	Merge, MerkleProof, Result as MMRResult, MMR,
+};
 use codec::{Decode, Encode};
-use scale_info::TypeInfo;
-use sp_std::{vec, vec::Vec, prelude::ToOwned};
 use frame_support::{
+	dispatch::GetDispatchInfo,
 	pallet_prelude::*,
 	traits::{ConstU32, IsSubType},
-	dispatch::GetDispatchInfo,
 };
-use sp_runtime::{DispatchResult, traits::Dispatchable};
-use ckb_merkle_mountain_range::{
-	MerkleProof,
-    MMR, Merge, Result as MMRResult,
-    util::{MemMMR, MemStore},
-};
+use log::info;
 use murmur_core::{
 	murmur,
-	types::{
-		Leaf, MergeLeaves,
-		BlockNumber,
-	}
+	types::{BlockNumber, Leaf, MergeLeaves},
 };
+use scale_info::TypeInfo;
+use sp_runtime::{traits::Dispatchable, DispatchResult};
+use sp_std::{prelude::ToOwned, vec, vec::Vec};
 
 use pallet_randomness_beacon::{Ciphertext, TimelockEncryptionProvider};
 
@@ -47,10 +43,16 @@ pub type Name = BoundedVec<u8, ConstU32<32>>;
 
 /// A struct to represent specific details of a murmur proxy account
 #[derive(
-	Debug, 
-	PartialEq, Eq, Hash, 
-	Clone, Encode, Decode, TypeInfo, 
-	serde::Serialize, serde::Deserialize
+	Debug,
+	PartialEq,
+	Eq,
+	Hash,
+	Clone,
+	Encode,
+	Decode,
+	TypeInfo,
+	serde::Serialize,
+	serde::Deserialize,
 )]
 pub struct MurmurProxyDetails<AccountId> {
 	/// The proxy account address
@@ -64,11 +66,8 @@ pub struct MurmurProxyDetails<AccountId> {
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
-	use sp_runtime::{
-		DispatchResult,
-		traits::Zero,
-	};
 	use frame_system::pallet_prelude::*;
+	use sp_runtime::{traits::Zero, DispatchResult};
 
 	#[pallet::pallet]
 	#[pallet::without_storage_info]
@@ -102,7 +101,7 @@ pub mod pallet {
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
 		OtpProxyCreated,
-		OtpProxyExecuted
+		OtpProxyExecuted,
 	}
 
 	// Errors inform users that something went wrong.
@@ -115,7 +114,7 @@ pub mod pallet {
 		InvalidProxy,
 		ProxyDNE,
 	}
- 
+
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
 
@@ -136,13 +135,11 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 
 			// check duplicate name
-			ensure!(
-				Registry::<T>::get(name.clone()).is_none(), 
-				Error::<T>::DuplicateName
-			);
+			ensure!(Registry::<T>::get(name.clone()).is_none(), Error::<T>::DuplicateName);
 
 			// create a pure proxy with no delegate
-			let signed_origin: T::RuntimeOrigin = frame_system::RawOrigin::Signed(who.clone()).into();
+			let signed_origin: T::RuntimeOrigin =
+				frame_system::RawOrigin::Signed(who.clone()).into();
 			pallet_proxy::Pallet::<T>::create_pure(
 				signed_origin,
 				T::ProxyType::default(),
@@ -151,12 +148,9 @@ pub mod pallet {
 				true,
 			)?;
 
-			let address = pallet_proxy::Pallet::<T>::pure_account(
-				&who, 
-				&T::ProxyType::default(), 
-				0, None
-			);
-			
+			let address =
+				pallet_proxy::Pallet::<T>::pure_account(&who, &T::ProxyType::default(), 0, None);
+
 			Registry::<T>::insert(name, &MurmurProxyDetails { address, root, size });
 			Self::deposit_event(Event::OtpProxyCreated);
 
@@ -172,7 +166,8 @@ pub mod pallet {
 		/// * `position`: The position in the MMR of the encrypted OTP code
 		/// * `target_leaf`: The target leaf data (ciphertext)
 		/// * `hash`: A hash to commit to the OTP code and call data
-		/// * `proof`: A merkle proof the the target leaf is in the expected MMR
+		/// * `proof`: A merkle proof that the target leaf is in the expected MMR at the given position
+		/// * `size`: The size of the Merkle proof
 		/// * `call`: The call to be proxied
 		///
 		#[pallet::weight(0)]
@@ -187,41 +182,36 @@ pub mod pallet {
 			size: u64,
 			call: sp_std::boxed::Box<<T as pallet_proxy::Config>::RuntimeCall>,
 		) -> DispatchResult {
-			// let who = ensure_signed(origin)?;
 			let when = T::TlockProvider::latest();
 
-			let proxy_details = Registry::<T>::get(name.clone())
-				.ok_or(Error::<T>::InvalidProxy)?;
+			let proxy_details = Registry::<T>::get(name.clone()).ok_or(Error::<T>::InvalidProxy)?;
 
 			let result = T::TlockProvider::decrypt_at(&ciphertext, when)
 				.map_err(|_| Error::<T>::BadCiphertext)?;
 			let mut otp = result.message;
 
-			let leaves: Vec<Leaf> = proof.clone().into_iter()
-				.map(|p| Leaf(p)).collect::<Vec<_>>();
+			let leaves: Vec<Leaf> = proof.clone().into_iter().map(|p| Leaf(p)).collect::<Vec<_>>();
 			let merkle_proof = MerkleProof::<Leaf, MergeLeaves>::new(size, leaves.clone());
 			let root = Leaf(proxy_details.root);
 
-			let test = merkle_proof.verify(root.clone(), vec![(position.clone(), Leaf(ciphertext.clone()))]);
-			log::info!("****************************************************************************************** Precheck merkle proof validity? {:?}, had mmr size {:?}", test, size);
-
 			let validity = murmur::verify(
-				root, 
-				merkle_proof, 
-				hash, 
-				ciphertext, 
-				otp, 
-				call.encode().to_vec(), 
+				root,
+				merkle_proof,
+				hash,
+				ciphertext,
+				otp,
+				call.encode().to_vec(),
 				position
 			);
 
 			frame_support::ensure!(validity, Error::<T>::InvalidMerkleProof);
 
 			let def = pallet_proxy::Pallet::<T>::find_proxy(
-				&proxy_details.address, 
-				None, 
-				Some(T::ProxyType::default())
-			).map_err(|_| Error::<T>::InvalidProxy)?;
+				&proxy_details.address,
+				None,
+				Some(T::ProxyType::default()),
+			)
+			.map_err(|_| Error::<T>::InvalidProxy)?;
 
 			pallet_proxy::Pallet::<T>::do_proxy(def, proxy_details.address, *call);
 
@@ -230,8 +220,3 @@ pub mod pallet {
 		}
 	}
 }
-
-// impl<T: Config> Pallet<T> {
-
-	
-// }
